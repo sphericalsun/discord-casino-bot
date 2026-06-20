@@ -10,36 +10,42 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from collections import Counter
-
+from dotenv import load_dotenv
 # ==========================================
 # ⚙️ 설정 & 전역 변수
 # ==========================================
+load_dotenv()
 DB_PATH = "casino_v20_aris.db"
-DEVELOPER_IDS = [1191636405684818022, 1263501644361105562]
+DEVELOPER_IDS = [
+    int(x.strip())
+    for x in os.getenv("DEVELOPER_IDS", "").split(",")
+    if x.strip()
+]
+BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
 
 GLOBAL_PLAYING_USERS = set()
 BLACKJACK_GAMES = {}
-DB_LOCK = asyncio.Lock()   # DB 경쟁 조건 방지
+DB_LOCK = asyncio.Lock()
 STATE_BACKUP_PATH = "casino_state_backup.json"
 
 # ==========================================
 # 🛠️ 권한 확인 함수
 # ==========================================
 def is_host_or_admin(interaction: discord.Interaction, table) -> bool:
-    is_host = interaction.user.id == table.host.id
+    is_host  = interaction.user.id == table.host.id
     is_admin = interaction.user.guild_permissions.administrator
     return is_host or is_admin
 
 def is_authorized_admin(interaction: discord.Interaction) -> bool:
-    is_owner = interaction.guild and (interaction.guild.owner_id == interaction.user.id)
+    is_owner     = interaction.guild and (interaction.guild.owner_id == interaction.user.id)
     is_developer = interaction.user.id in DEVELOPER_IDS
     return is_owner or is_developer
 
 # ==========================================
-# 💾 데이터베이스  (check_same_thread=False + asyncio.Lock)
+# 💾 데이터베이스 (check_same_thread=False + asyncio.Lock)
 # ==========================================
 def db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -53,7 +59,6 @@ def init_db():
         balance INTEGER DEFAULT 10000,
         last_daily TEXT
     )""")
-    # ── 게임 로그 테이블 추가 ──────────────────────
     con.execute("""CREATE TABLE IF NOT EXISTS game_log(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         table_id TEXT,
@@ -95,6 +100,12 @@ def set_balance(uid, amount):
     con.commit()
     con.close()
 
+def set_all_balances(amount):
+    con = db()
+    con.execute("UPDATE users SET balance = ?", (amount,))
+    con.commit()
+    con.close()
+
 def update_balance(uid, amount):
     ensure_user(uid)
     con = db()
@@ -111,9 +122,9 @@ def update_all_balances(amount):
 def record_game_result(players, winner, entry_cost, table_id, game_type, prize_pool):
     con = db()
     cost_key = int(entry_cost / 1000) if entry_cost >= 1000 else 0
-    p_count = len(players)
-    gp_col = f"gp_{cost_key}k_{p_count}p"
-    w_col  = f"w_{cost_key}k_{p_count}p"
+    p_count  = len(players)
+    gp_col   = f"gp_{cost_key}k_{p_count}p"
+    w_col    = f"w_{cost_key}k_{p_count}p"
     try:
         for p in players:
             ensure_user(p.member.id)
@@ -127,7 +138,6 @@ def record_game_result(players, winner, entry_cost, table_id, game_type, prize_p
                 f"UPDATE stats SET wins_total=wins_total+1, {w_col}={w_col}+1 WHERE user_id=?",
                 (winner.member.id,)
             )
-        # 게임 로그 기록
         con.execute(
             "INSERT INTO game_log(table_id,game_type,entry_cost,player_count,winner_id,prize,created_at) VALUES(?,?,?,?,?,?,?)",
             (table_id, game_type, entry_cost, p_count,
@@ -166,7 +176,7 @@ def daily_check(uid):
     ensure_user(uid)
     con = db()
     today = datetime.date.today().isoformat()
-    last = con.execute("SELECT last_daily FROM users WHERE user_id=?", (uid,)).fetchone()[0]
+    last  = con.execute("SELECT last_daily FROM users WHERE user_id=?", (uid,)).fetchone()[0]
     if last == today:
         con.close()
         return False
@@ -186,22 +196,20 @@ def card_str(card):
     s = card % 4
     return f"[{RANK_STR.get(r, str(r))}{SUITS[s]}]"
 
-def make_deck():  return list(range(52))
+def make_deck():     return list(range(52))
 def deal_card(deck): return deck.pop()
 
 def eval_hand(cards, use_back_straight=False):
-    ranks      = sorted([c // 4 + 2 for c in cards], reverse=True)
-    suits      = [c % 4 for c in cards]
+    ranks       = sorted([c // 4 + 2 for c in cards], reverse=True)
+    suits       = [c % 4 for c in cards]
     rank_counts = Counter(ranks)
-    s_counts   = Counter(suits)
+    s_counts    = Counter(suits)
 
-    # ── 플러시 판정: 5장 이상인 무늬 중 가장 높은 랭크 합산 무늬 선택 ──
     is_flush   = False
     flush_suit = None
     flush_candidates = [(s, c) for s, c in s_counts.items() if c >= 5]
     if flush_candidates:
-        is_flush = True
-        # 같은 장수라면 최고 랭크 카드가 있는 무늬 선택
+        is_flush   = True
         flush_suit = max(
             flush_candidates,
             key=lambda sc: sorted([c // 4 + 2 for c in cards if c % 4 == sc[0]], reverse=True)
@@ -228,13 +236,12 @@ def eval_hand(cards, use_back_straight=False):
                     found.append(c)
         return found[:limit] if limit else found
 
-    # 스트레이트 플러시
     if is_flush:
         f_cards = [c for c in cards if c % 4 == flush_suit]
         f_ranks = sorted(list({c // 4 + 2 for c in f_cards}), reverse=True)
         st = get_straight(f_ranks)
         if st:
-            tgt  = [14, 2, 3, 4, 5] if st == 5 else list(range(st, st - 5, -1))
+            tgt   = [14, 2, 3, 4, 5] if st == 5 else list(range(st, st - 5, -1))
             best5 = []
             for r in tgt:
                 for c in f_cards:
@@ -259,7 +266,7 @@ def eval_hand(cards, use_back_straight=False):
     uniq_ranks = sorted(list(set(ranks)), reverse=True)
     st = get_straight(uniq_ranks)
     if st:
-        tgt  = [14, 5, 4, 3, 2] if st == 5 else list(range(st, st - 5, -1))
+        tgt   = [14, 5, 4, 3, 2] if st == 5 else list(range(st, st - 5, -1))
         best5 = []
         for r in tgt:
             for c in cards:
@@ -272,7 +279,7 @@ def eval_hand(cards, use_back_straight=False):
         return (3, (t, tuple(ks)), find_cards([t], 3) + find_cards(ks, 2))
     if len(pairs) >= 2:
         pairs_s = sorted(pairs, reverse=True)
-        p1, p2 = pairs_s[0], pairs_s[1]
+        p1, p2  = pairs_s[0], pairs_s[1]
         k = max(r for r in ranks if r not in (p1, p2))
         return (2, (p1, p2, k), find_cards([p1], 2) + find_cards([p2], 2) + find_cards([k], 1))
     if pairs:
@@ -284,15 +291,25 @@ def eval_hand(cards, use_back_straight=False):
     return (0, tuple(c // 4 + 2 for c in best5), best5)
 
 def hand_name(val):
-    return ["High Card","One Pair","Two Pair","Three of a Kind",
-            "Straight","Flush","Full House","Four of a Kind","Straight Flush"][val]
+    return ["High Card", "One Pair", "Two Pair", "Three of a Kind",
+            "Straight", "Flush", "Full House", "Four of a Kind", "Straight Flush"][val]
 
-# ── 보드 힌트: 현재 커뮤니티 카드로 만들 수 있는 최강 족보 ──────────────
 def board_best_hand_hint(community):
     if len(community) < 3:
         return ""
     score, _, _ = eval_hand(community)
     return f"🃏 보드 최강: **{hand_name(score)}**"
+
+# ==========================================
+# 🎉 특수 효과: 포카드 이상 핸드 시 표시할 이펙트
+# ==========================================
+def special_hand_effect(score):
+    """포카드(7) 이상의 핸드에 대해 화려한 특수효과 문자열을 반환."""
+    if score >= 8:
+        return "\n🎆🎇✨ **로열/스트레이트 플러시!! 폭죽이 터집니다!** ✨🎇🎆\n🎉🎊🎉🎊🎉🎊🎉🎊🎉🎊"
+    if score == 7:
+        return "\n🎆✨ **포카드(Four of a Kind)!! 대박 핸드!** ✨🎆\n🎉🎊🎉🎊🎉"
+    return ""
 
 # ==========================================
 # 🎴 블랙잭 공통 로직
@@ -311,55 +328,59 @@ def get_bj_score(cards):
 def get_character_dialogue(char_type):
     if char_type == "key":
         return {
-            "title": "⚙️ <Key> 시스템 동기화",
-            "start": "흥... 선생님이 굳이 저를 선택하셨으니 상대는 해 드리겠습니다. 딱히 기대하는 건 아닙니다만.",
-            "next": "왜 가만히 계십니까? 제 연산 자원을 낭비시키는 취미라도 있으신 겁니까?",
-            "hit": "🎴 **[추가 연산 수행]** 하아... 또 카드입니까? 알겠습니다. 요청이니 처리해 드리죠.",
-            "blackjack": "✨ **[최적 해 도출] 블랙잭 달성!** ...제법이군요. 물론 선생님 실력이라기보다 제가 옆에 있었기 때문일 가능성이 높습니다.",
-            "win": "🎉 **[승리 확인]** 축하 정도는 해 드리겠습니다. 기뻐하십시오. 제가 직접 인정하는 일은 흔치 않으니까요.",
-            "push": "🤝 **[결과 동률]** 흥, 나쁘지 않은 결과입니다. 선생님 치고는 꽤 선전하셨군요.",
-            "lose": "💀 **[패배 기록]** 거 봐요. 제 계산을 좀 더 믿으셨어야죠. ...뭐, 다음엔 조금 더 나은 선택을 하시길 바랍니다.",
-            "dealer_blackjack": "......\n\n아, 이런.\n\n이건 좀 억울하네요.\n\n선생님이 못한 것보단\n상대 운이 너무 좋았던 것 같아요.",
-            "timeout_refund": "선생님?\n\n게임 시작하자마자 어디 가신 건가요?\n\n흥...\n이번은 없던 걸로 해 드릴게요.",
-            "timeout_lose": "정말이지...\n\n기다리는 것도 한계가 있거든요.\n\n이번 판은 제가 정리해 버렸어요.\n\n...다음엔 조금만 더 집중하세요.",
-            "dealer_name": "🤖 케이 (Key)",
-            "color": 0x4A69BD
+            "title":            "⚙️ <Key> 시스템 동기화",
+            "start":            "아, 오셨군요.\n이번에도 저를 바쁘게 만들 생각인가요?\n뭐... 어차피 말려도 하실 거잖아요.",
+            "next":             "선생님?\n설마 또 고민만 하고 계신 건 아니죠?\n정말이지...",
+            "hit":              "🎴 또 받으시겠다고요?\n흥, 좋을 대로 하세요.\n나중에 결과가 이상해져도 전 몰라요.",
+            "stand":            "거기서 멈추시는 건가요?\n의외로 무난한 선택이네요.",
+            "blackjack":        "어라?\n정말 해내셨네요.\n✨ 블랙잭입니다.\n...흥. 이번만큼은 꽤 멋졌다고 해 둘게요.",
+            "big_win":          "흥.\n이 정도면 꽤 잘한 편이네요.\n...칭찬해 달라는 표정은 하지 마세요.",
+            "win":              "오...\n생각보다 잘 풀렸네요.\n선생님답지 않게 말이에요.",
+            "push":             "흠.\n애매하긴 하지만...\n적어도 망한 건 아니잖아요?",
+            "lose":             "하아...\n그러니까 조금 더 신중하게 하라고 했잖아요.\n뭐, 다음 판이 있으니까요.",
+            "dealer_blackjack": "......\n아, 이런.\n이건 좀 억울하네요.\n선생님이 못한 것보단 상대 운이 너무 좋았던 것 같아요.",
+            "timeout_refund":   "선생님?\n게임 시작하자마자 어디 가신 건가요?\n흥...\n이번은 없던 걸로 해 드릴게요.",
+            "timeout_lose":     "정말이지...\n기다리는 것도 한계가 있거든요.\n이번 판은 제가 정리해 버렸어요.\n...다음엔 조금만 더 집중하세요.",
+            "dealer_name":      "🤖 케이 (Key)",
+            "color":            0x4A69BD,
         }
     return {
-        "title":       "🃏 아리스와의 블랙잭 승부",
-        "start":       "빠밤! 카드를 나눠드렸습니다. 선생님, 준비되셨나요?",
-        "next":        "선생님! 다음 행동을 선택해 주세요! 아리스, 대기 중입니다.",
-        "hit":         "🎴 **[드로우!]** 카드를 한 장 뽑았습니다. 현재 스코어 확인 중...",
-        "blackjack":   "✨ **빠밤! 크리티컬 히트! 블랙잭입니다!** (보상 x1.5배 획득!)",
-        "win":         "🎉 **퀘스트 클리어! 아리스를 이겼습니다! 선생님은 역시 고수시군요!**",
-        "push":        "🤝 **무승부! 비겼습니다. 선생님과 아리스의 실력은 막상막하입니다.** (베팅 반환)",
-        "lose":        "💀 **게임 오버... 아리스의 승리입니다! 선생님, 청휘석은 소중히 다뤄야 합니다.**",
-        "dealer_blackjack": "💥 딜러 블랙잭 발생!\n\n히잉...\n\n이번엔 운이 조금 안 따라줬네요.\n\n다음 판엔 꼭 이길 수 있을 거예요!",
-        "timeout_refund": "어라?\n\n선생님이 안 계시네요!\n\n음...\n이번 게임은 취소하고 칩은 돌려드릴게요!",
-        "timeout_lose": "앗!\n\n선생님을 기다렸는데 시간이 다 지나 버렸어요...\n\n이번 판은 패배 처리예요.\n\n다음엔 같이 끝까지 해요!",
-        "dealer_name": "🤖 아리스 (Aris)",
-        "color":       0x3498db
+        "title":            "🃏 아리스와의 블랙잭 승부",
+        "start":            "빠밤! 카드를 나눠드렸습니다. 선생님, 준비되셨나요?",
+        "next":             "선생님! 다음 행동을 선택해 주세요! 아리스, 대기 중입니다.",
+        "hit":              "🎴 **[드로우!]** 카드를 한 장 뽑았습니다. 현재 스코어 확인 중...",
+        "stand":            "✋ 스탠드! 딜러 차례입니다...",
+        "blackjack":        "✨ **빠밤! 크리티컬 히트! 블랙잭입니다!** (보상 x1.5배 획득!)",
+        "big_win":          "🎉 **와아! 대승리! 선생님 정말 대단해요!!**",
+        "win":              "🎉 **퀘스트 클리어! 아리스를 이겼습니다! 선생님은 역시 고수시군요!**",
+        "push":             "🤝 **무승부! 비겼습니다. 선생님과 아리스의 실력은 막상막하입니다.** (베팅 반환)",
+        "lose":             "💀 **게임 오버... 아리스의 승리입니다! 선생님, 청휘석은 소중히 다뤄야 합니다.**",
+        "dealer_blackjack": "💥 딜러 블랙잭 발생!\n히잉...\n이번엔 운이 조금 안 따라줬네요.\n다음 판엔 꼭 이길 수 있을 거예요!",
+        "timeout_refund":   "어라?\n선생님이 안 계시네요!\n음...\n이번 게임은 취소하고 칩은 돌려드릴게요!",
+        "timeout_lose":     "앗!\n선생님을 기다렸는데 시간이 다 지나 버렸어요...\n이번 판은 패배 처리예요.\n다음엔 같이 끝까지 해요!",
+        "dealer_name":      "🤖 아리스 (Aris)",
+        "color":            0x3498db,
     }
-
 # ==========================================
 # 🎮 블랙잭 View
 # ==========================================
 class BlackjackCharacterSelectView(discord.ui.View):
     def __init__(self, user, amount):
         super().__init__(timeout=60)
-        self.user   = user
-        self.amount = amount
+        self.user    = user
+        self.amount  = amount
         self.message = None
-        self._ended = False
+        self._ended  = False
 
     async def on_timeout(self):
-        # 타임아웃 시 베팅금 자동 반환
         if self._ended:
             return
         self._ended = True
-        update_balance(self.user.id, self.amount)
-        GLOBAL_PLAYING_USERS.discard(self.user.id)
-        BLACKJACK_GAMES.pop(self.user.id, None)
+        try:
+            update_balance(self.user.id, self.amount)
+        finally:
+            GLOBAL_PLAYING_USERS.discard(self.user.id)
+            BLACKJACK_GAMES.pop(self.user.id, None)
         embed = discord.Embed(
             title="⌛ 블랙잭 시간 초과",
             description="딜러를 선택하지 않아 게임을 취소하고 베팅액을 반환했습니다.",
@@ -389,16 +410,22 @@ class BlackjackCharacterSelectView(discord.ui.View):
     @discord.ui.button(label="게임 종료", style=discord.ButtonStyle.danger, emoji="✖️")
     async def cancel_game(self, interaction: discord.Interaction, button: discord.ui.Button):
         self._ended = True
-        GLOBAL_PLAYING_USERS.discard(self.user.id)
-        BLACKJACK_GAMES.pop(self.user.id, None)
-        update_balance(self.user.id, self.amount)
-        embed = discord.Embed(title="🛑 게임 취소", description="블랙잭 시뮬레이션을 취소했습니다. 베팅액이 반환되었습니다.", color=0x95a5a6)
+        try:
+            update_balance(self.user.id, self.amount)
+        finally:
+            GLOBAL_PLAYING_USERS.discard(self.user.id)
+            BLACKJACK_GAMES.pop(self.user.id, None)
+        embed = discord.Embed(
+            title="🛑 게임 취소",
+            description="블랙잭 시뮬레이션을 취소했습니다. 베팅액이 반환되었습니다.",
+            color=0x95a5a6
+        )
         await interaction.response.edit_message(embed=embed, view=None)
 
     async def start_game(self, interaction: discord.Interaction, char_type):
         self._ended = True
-        self.stop()   # 타임아웃 on_timeout 방지 (이미 선택됨)
-        deck = make_deck(); random.shuffle(deck)
+        self.stop()
+        deck         = make_deck(); random.shuffle(deck)
         player_cards = [deal_card(deck), deal_card(deck)]
         dealer_cards = [deal_card(deck), deal_card(deck)]
 
@@ -407,25 +434,59 @@ class BlackjackCharacterSelectView(discord.ui.View):
         dialogue = get_character_dialogue(char_type)
         game_view = BlackjackGameView(self.user, self.amount, deck, player_cards, dealer_cards, char_type)
         channel_id = interaction.channel.id if interaction.channel else None
-        BLACKJACK_GAMES[self.user.id] = {"stage": "playing", "view": game_view, "bet": self.amount, "channel_id": channel_id}
+        BLACKJACK_GAMES[self.user.id] = {
+            "stage": "playing", "view": game_view,
+            "bet": self.amount, "channel_id": channel_id,
+        }
 
         d_show = f"{card_str(dealer_cards[0])} [??]"
         p_show = f"{card_str(player_cards[0])} {card_str(player_cards[1])} ({p_score})"
 
-        embed = discord.Embed(title=dialogue["title"], description=dialogue["start"], color=dialogue["color"])
-        embed.add_field(name=dialogue["dealer_name"], value=d_show, inline=False)
-        embed.add_field(name=f"👤 {self.user.display_name} 선생님", value=p_show, inline=False)
-        embed.set_footer(text=f"베팅액: {self.amount:,} 청휘석 | 남은 시간: 60초")
+        player_bj = (p_score == 21 and len(player_cards) == 2)
+        dealer_bj = (d_score == 21 and len(dealer_cards) == 2)
 
-        if d_score == 21 or p_score == 21:
-            if d_score == 21 and p_score == 21:
-                await game_view.end_round(interaction, "push")
-            elif d_score == 21:
-                await game_view.end_round(interaction, "dealer_blackjack")
-            else:
-                await game_view.end_round(interaction, "blackjack")
+        if player_bj or dealer_bj:
+            if player_bj and dealer_bj:   result = "push"
+            elif dealer_bj:               result = "dealer_blackjack"
+            else:                         result = "blackjack"
+            color_map = {"push": 0x95a5a6, "dealer_blackjack": 0xFF4444, "blackjack": 0xFFD700}
+            msg_map   = {
+                "push":             dialogue["push"],
+                "dealer_blackjack": dialogue["dealer_blackjack"],
+                "blackjack":        dialogue["blackjack"],
+            }
+            try:
+                if result == "blackjack":
+                    update_balance(self.user.id, self.amount + int(self.amount * 1.5))
+                elif result == "push":
+                    update_balance(self.user.id, self.amount)
+            finally:
+                GLOBAL_PLAYING_USERS.discard(self.user.id)
+                BLACKJACK_GAMES.pop(self.user.id, None)
+            game_view._ended = True
+            d_full = f"{card_str(dealer_cards[0])} {card_str(dealer_cards[1])} ({d_score})"
+            embed2 = discord.Embed(title=dialogue["title"], description=msg_map[result], color=color_map[result])
+            embed2.add_field(name=dialogue["dealer_name"], value=d_full, inline=False)
+            embed2.add_field(name=f"👤 {self.user.display_name} 선생님", value=p_show, inline=False)
+            embed2.set_footer(text=f"베팅액: {self.amount:,} 청휘석")
+            await interaction.response.edit_message(embed=embed2, view=None)
             return
 
+        # ── 딜러 A 공개 시 보험 제안 ────────────────────────────
+        dealer_upcard_rank = dealer_cards[0] // 4 + 2
+        if dealer_upcard_rank == 14:
+            game_view.insurance_offered = True
+
+        expiry = game_view._timeout_expiry
+        desc   = dialogue["start"] + f"\n\n⏳ **남은 시간:** <t:{expiry}:R>"
+        if game_view.insurance_offered:
+            desc += "\n\n🛡️ **딜러 에이스 공개! 보험(Insurance)에 가입하시겠습니까?**"
+        embed = discord.Embed(title=dialogue["title"], description=desc, color=dialogue["color"])
+        embed.add_field(name=dialogue["dealer_name"], value=d_show, inline=False)
+        embed.add_field(name=f"👤 {self.user.display_name} 선생님", value=p_show, inline=False)
+        embed.set_footer(text=f"베팅액: {self.amount:,} 청휘석")
+
+        game_view._sync_buttons()
         await interaction.response.edit_message(embed=embed, view=game_view)
         try:
             game_view.message = await interaction.original_response()
@@ -433,38 +494,99 @@ class BlackjackCharacterSelectView(discord.ui.View):
             pass
 
 
+# ── 멀티핸드 구조 ────────────────────────────────
+MAX_SPLITS = 4
+
+
+class BJHand:
+    """블랙잭 개별 핸드 (스플릿 시 여러 개 존재 가능)"""
+    def __init__(self, cards, bet, is_split_ace=False, from_split=False):
+        self.cards        = cards
+        self.bet          = bet
+        self.done         = False
+        self.is_split_ace = is_split_ace
+        self.from_split   = from_split
+        self.result       = None   # "win"/"lose"/"push"/"blackjack"/"dealer_blackjack"
+        self.doubled      = False
+
+    def score(self):
+        return get_bj_score(self.cards)
+
+    def is_blackjack(self):
+        return (not self.from_split) and len(self.cards) == 2 and self.score() == 21
+
+    def is_bust(self):
+        return self.score() > 21
+
+
 class BlackjackGameView(discord.ui.View):
     def __init__(self, user, bet_amount, deck, player_cards, dealer_cards, char_type):
         super().__init__(timeout=60)
-        self.user      = user
-        self.bet       = bet_amount
-        self.deck      = deck
-        self.p_cards   = player_cards
-        self.d_cards   = dealer_cards
-        self.char_type = char_type
-        self.dialogue  = get_character_dialogue(char_type)
-        self._ended    = False   # 중복 종료 방지
-        self.has_seen_cards = True
-        self.message = None
+        self.user            = user
+        self.deck            = deck
+        self.d_cards         = dealer_cards
+        self.char_type       = char_type
+        self.dialogue        = get_character_dialogue(char_type)
+        self._ended          = False
+        self.has_seen_cards  = True
+        self.message         = None
+        self._timeout_expiry = int(time.time()) + 60
+
+        self.hands        = [BJHand(player_cards, bet_amount)]
+        self.cur_hand_idx = 0
+        self.split_count  = 0
+
+        self.insurance_offered  = False
+        self.insurance_taken    = False
+        self.insurance_resolved = False
+
+        self._sync_buttons()
+
+    @property
+    def bet(self):
+        return self.hands[0].bet if self.hands else 0
+
+    @property
+    def p_cards(self):
+        return self.hands[self.cur_hand_idx].cards if self.hands else []
+
+    def cur_hand(self):
+        return self.hands[self.cur_hand_idx]
+
+    def total_bet(self):
+        return sum(h.bet for h in self.hands)
 
     async def on_timeout(self):
-        # 패 공개 전이면 환불, 공개 후면 딜러 승리로 종료
         if self._ended:
             return
         self._ended = True
-        GLOBAL_PLAYING_USERS.discard(self.user.id)
-        BLACKJACK_GAMES.pop(self.user.id, None)
-        result_key = "timeout_lose" if self.has_seen_cards else "timeout_refund"
-        color = 0xFF0000 if self.has_seen_cards else 0x95a5a6
-        if not self.has_seen_cards:
-            update_balance(self.user.id, self.bet)
+        try:
+            if self.has_seen_cards:
+                result_key = "timeout_lose"
+                color      = 0xFF0000
+                for h in self.hands:
+                    if h.result is None:
+                        h.result = "lose"
+                        h.done   = True
+            else:
+                update_balance(self.user.id, self.total_bet())
+                result_key = "timeout_refund"
+                color      = 0x95a5a6
+        except Exception as e:
+            print(f"[BJ Timeout Error] {e}")
+            result_key = "timeout_lose"
+            color = 0xFF0000
+        finally:
+            GLOBAL_PLAYING_USERS.discard(self.user.id)
+            BLACKJACK_GAMES.pop(self.user.id, None)
+
         self.clear_items(); self.stop()
-        embed = self.make_embed(end_game=True, result_msg=self.dialogue[result_key], color=color)
-        if self.message:
-            try:
+        try:
+            embed = self.make_embed(end_game=True, result_msg=self.dialogue[result_key], color=color)
+            if self.message:
                 await self.message.edit(embed=embed, view=None)
-            except:
-                pass
+        except Exception as e:
+            print(f"[BJ Timeout Edit Error] {e}")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user.id:
@@ -472,23 +594,68 @@ class BlackjackGameView(discord.ui.View):
             return False
         return True
 
+    def _sync_buttons(self):
+        if not self.hands:
+            return
+        h   = self.cur_hand()
+        bal = get_user_balance(self.user.id)
+
+        can_double = (len(h.cards) == 2 and not h.is_split_ace and bal >= h.bet)
+        can_split  = (
+            len(h.cards) == 2
+            and not h.is_split_ace
+            and self.split_count < MAX_SPLITS
+            and bal >= h.bet
+            and (h.cards[0] // 4 + 2) == (h.cards[1] // 4 + 2)
+        )
+        can_hit = not h.is_split_ace
+
+        self.hit_btn.disabled       = not can_hit
+        self.stand_btn.disabled     = False
+        self.double_btn.disabled    = not can_double
+        self.split_btn.disabled     = not can_split
+        self.insurance_btn.disabled = not (self.insurance_offered and not self.insurance_resolved)
+
     def make_embed(self, end_game=False, result_msg="", color=None):
-        p_score = get_bj_score(self.p_cards)
-        d_score = get_bj_score(self.d_cards)
         tgt_color = color if color else self.dialogue["color"]
+        d_score   = get_bj_score(self.d_cards)
 
-        d_str = (" ".join(card_str(c) for c in self.d_cards) + f" ({d_score})") if end_game else f"{card_str(self.d_cards[0])} [??]"
-        p_str = " ".join(card_str(c) for c in self.p_cards) + f" ({p_score})"
+        d_str = (" ".join(card_str(c) for c in self.d_cards) + f" ({d_score})") if end_game \
+                else f"{card_str(self.d_cards[0])} [??]"
 
-        embed = discord.Embed(title=self.dialogue["title"], description=result_msg or self.dialogue["next"], color=tgt_color)
+        desc = result_msg or self.dialogue["next"]
+        if not end_game:
+            desc += f"\n\n⏳ **남은 시간:** <t:{self._timeout_expiry}:R>"
+
+        embed = discord.Embed(title=self.dialogue["title"], description=desc, color=tgt_color)
         embed.add_field(name=self.dialogue["dealer_name"], value=d_str, inline=False)
-        embed.add_field(name=f"👤 {self.user.display_name} 선생님", value=p_str, inline=False)
-        embed.set_footer(text=f"현재 베팅: {self.bet:,} 청휘석 | 남은 시간: 60초")
+
+        if len(self.hands) == 1:
+            h     = self.hands[0]
+            p_str = " ".join(card_str(c) for c in h.cards) + f" ({h.score()})"
+            embed.add_field(name=f"👤 {self.user.display_name} 선생님", value=p_str, inline=False)
+        else:
+            for i, h in enumerate(self.hands):
+                marker = "▶️ " if (not end_game and i == self.cur_hand_idx) else ""
+                tag = ""
+                if end_game and h.result:
+                    tag_map = {
+                        "win": " ✅승", "lose": " ❌패", "push": " 🤝무",
+                        "blackjack": " ✨BJ", "dealer_blackjack": " ❌패",
+                    }
+                    tag = tag_map.get(h.result, "")
+                p_str = " ".join(card_str(c) for c in h.cards) + f" ({h.score()}){tag}"
+                embed.add_field(name=f"{marker}핸드 {i+1} (베팅 {h.bet:,})", value=p_str, inline=False)
+
+        footer = f"총 베팅: {self.total_bet():,} 청휘석"
+        if self.insurance_taken:
+            footer += " | 🛡️ 보험 가입됨"
+        embed.set_footer(text=footer)
         return embed
 
     async def update_board(self, interaction, end_game=False, result_msg="", color=None):
+        self._sync_buttons()
         embed = self.make_embed(end_game=end_game, result_msg=result_msg, color=color)
-
         if end_game:
             self._ended = True
             GLOBAL_PLAYING_USERS.discard(self.user.id)
@@ -500,67 +667,192 @@ class BlackjackGameView(discord.ui.View):
         except:
             pass
 
-    async def end_round(self, interaction, result):
-        color = self.dialogue["color"]
-        if result == "blackjack":
-            payout = int(self.bet * 1.5); msg = self.dialogue["blackjack"]; color = 0xFFD700
-            update_balance(self.user.id, self.bet + payout)
-        elif result == "win":
-            payout = self.bet; msg = self.dialogue["win"]; color = 0x00FF00
-            update_balance(self.user.id, self.bet + payout)
-        elif result == "push":
-            msg = self.dialogue["push"]; color = 0x95a5a6
-            update_balance(self.user.id, self.bet)
-        elif result == "dealer_blackjack":
-            msg = self.dialogue["dealer_blackjack"]; color = 0xFF0000
+    def _resolve_hand_vs_dealer(self, h, dealer_bj):
+        if h.result is not None:
+            return
+        p_score = h.score()
+        if dealer_bj and h.is_blackjack():
+            h.result = "push"
+        elif dealer_bj:
+            h.result = "dealer_blackjack"
+        elif h.is_blackjack():
+            h.result = "blackjack"
+        elif p_score > 21:
+            h.result = "lose"
         else:
-            msg = self.dialogue["lose"]; color = 0xFF0000
+            d_score = get_bj_score(self.d_cards)
+            if d_score > 21 or p_score > d_score:   h.result = "win"
+            elif p_score == d_score:                 h.result = "push"
+            else:                                    h.result = "lose"
+
+    def _payout_hand(self, h):
+        if h.result == "blackjack":
+            update_balance(self.user.id, h.bet + int(h.bet * 1.5))
+        elif h.result == "win":
+            update_balance(self.user.id, h.bet * 2)
+        elif h.result == "push":
+            update_balance(self.user.id, h.bet)
+
+    async def _finish_all_hands(self, interaction):
+        any_live = any(not h.is_bust() for h in self.hands)
+        if any_live:
+            while get_bj_score(self.d_cards) < 17:
+                self.d_cards.append(deal_card(self.deck))
+
+        dealer_bj = (get_bj_score(self.d_cards) == 21 and len(self.d_cards) == 2)
+
+        for h in self.hands:
+            if h.is_bust():
+                h.result = "lose"
+            else:
+                self._resolve_hand_vs_dealer(h, dealer_bj)
+
+        for h in self.hands:
+            self._payout_hand(h)
+
+        if len(self.hands) == 1:
+            r = self.hands[0].result
+            color_map = {
+                "blackjack": 0xFFD700, "win": 0x00FF00, "push": 0x95a5a6,
+                "lose": 0xFF0000, "dealer_blackjack": 0xFF4444,
+            }
+            msg   = self.dialogue.get(r, self.dialogue["lose"])
+            color = color_map.get(r, 0xFF0000)
+        else:
+            wins   = sum(1 for h in self.hands if h.result in ("win", "blackjack"))
+            loses  = sum(1 for h in self.hands if h.result in ("lose", "dealer_blackjack"))
+            pushes = sum(1 for h in self.hands if h.result == "push")
+            if wins > loses:
+                msg = self.dialogue["win"];  color = 0x00FF00
+            elif loses > wins:
+                msg = self.dialogue["lose"]; color = 0xFF0000
+            else:
+                msg = self.dialogue["push"]; color = 0x95a5a6
+            msg += f"\n\n📊 스플릿 결과: 승 {wins} / 패 {loses} / 무 {pushes}"
 
         await self.update_board(interaction, end_game=True, result_msg=msg, color=color)
 
-    @discord.ui.button(label="히트 (Hit)", style=discord.ButtonStyle.primary, emoji="👊")
-    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.p_cards.append(deal_card(self.deck))
-        score = get_bj_score(self.p_cards)
+    async def _advance_or_finish(self, interaction):
+        self.cur_hand().done = True
+        next_idx = next((i for i, h in enumerate(self.hands) if not h.done), None)
+        if next_idx is None:
+            await self._finish_all_hands(interaction)
+            return
+        self.cur_hand_idx = next_idx
+        h = self.cur_hand()
+        if h.is_split_ace:
+            h.cards.append(deal_card(self.deck))
+            h.done = True
+            await self._advance_or_finish(interaction)
+            return
+        await self.update_board(
+            interaction,
+            result_msg=f"➡️ **핸드 {self.cur_hand_idx + 1}** 진행합니다.\n\n" + self.dialogue["next"]
+        )
 
-        if score > 21:
-            await self.end_round(interaction, "lose")
-        elif score == 21:
-            await self.end_round(interaction, "blackjack")
+    @discord.ui.button(label="히트 (Hit)", style=discord.ButtonStyle.primary, emoji="👊")
+    async def hit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        h = self.cur_hand()
+        h.cards.append(deal_card(self.deck))
+        if h.score() >= 21:
+            await self._advance_or_finish(interaction)
         else:
             await self.update_board(interaction, result_msg=self.dialogue["hit"])
 
     @discord.ui.button(label="스탠드 (Stand)", style=discord.ButtonStyle.success, emoji="✋")
-    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
-        while get_bj_score(self.d_cards) < 17:
-            self.d_cards.append(deal_card(self.deck))
-        p_score = get_bj_score(self.p_cards); d_score = get_bj_score(self.d_cards)
-        if   d_score > 21 or p_score > d_score: await self.end_round(interaction, "win")
-        elif p_score == d_score:                 await self.end_round(interaction, "push")
-        else:                                    await self.end_round(interaction, "lose")
+    async def stand_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._advance_or_finish(interaction)
 
     @discord.ui.button(label="더블 다운 (Double)", style=discord.ButtonStyle.secondary, emoji="💰")
-    async def double(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if len(self.p_cards) != 2:
-            return await interaction.response.send_message("❌ 더블 다운은 첫 턴에만 가능합니다!", ephemeral=True)
+    async def double_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        h = self.cur_hand()
+        if len(h.cards) != 2 or h.is_split_ace:
+            return await interaction.response.send_message(
+                "❌ 더블 다운은 (스플릿 에이스 제외) 첫 턴에만 가능합니다!", ephemeral=True
+            )
         bal = get_user_balance(self.user.id)
-        if bal < self.bet:
+        if bal < h.bet:
             return await interaction.response.send_message("❌ 소지금이 부족합니다!", ephemeral=True)
-        update_balance(self.user.id, -self.bet); self.bet *= 2
-        self.p_cards.append(deal_card(self.deck))
-        score = get_bj_score(self.p_cards)
-        if score > 21:
-            await self.end_round(interaction, "lose")
-        elif score == 21:
-            await self.end_round(interaction, "blackjack")
-        else:
-            while get_bj_score(self.d_cards) < 17:
-                self.d_cards.append(deal_card(self.deck))
-            d_score = get_bj_score(self.d_cards)
-            if   d_score > 21 or score > d_score: await self.end_round(interaction, "win")
-            elif score == d_score:                 await self.end_round(interaction, "push")
-            else:                                  await self.end_round(interaction, "lose")
+        update_balance(self.user.id, -h.bet)
+        h.bet    *= 2
+        h.doubled = True
+        h.cards.append(deal_card(self.deck))
+        await self._advance_or_finish(interaction)
 
+    @discord.ui.button(label="스플릿 (Split)", style=discord.ButtonStyle.blurple, emoji="✂️")
+    async def split_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        h = self.cur_hand()
+        if len(h.cards) != 2 or h.is_split_ace:
+            return await interaction.response.send_message(
+                "❌ 스플릿은 최초 2장이 같은 값일 때만 가능합니다.", ephemeral=True
+            )
+        if (h.cards[0] // 4 + 2) != (h.cards[1] // 4 + 2):
+            return await interaction.response.send_message(
+                "❌ 두 카드의 값이 같아야 스플릿할 수 있습니다.", ephemeral=True
+            )
+        if self.split_count >= MAX_SPLITS:
+            return await interaction.response.send_message(
+                f"❌ 최대 스플릿 횟수({MAX_SPLITS}회)를 초과했습니다.", ephemeral=True
+            )
+        bal = get_user_balance(self.user.id)
+        if bal < h.bet:
+            return await interaction.response.send_message("❌ 소지금이 부족합니다!", ephemeral=True)
+
+        update_balance(self.user.id, -h.bet)
+        self.split_count += 1
+
+        is_ace = (h.cards[0] // 4 + 2) == 14
+        card1, card2 = h.cards[0], h.cards[1]
+        new_bet = h.bet
+
+        hand1 = BJHand([card1, deal_card(self.deck)], new_bet, is_split_ace=is_ace, from_split=True)
+        hand2 = BJHand([card2, deal_card(self.deck)], new_bet, is_split_ace=is_ace, from_split=True)
+        self.hands[self.cur_hand_idx:self.cur_hand_idx + 1] = [hand1, hand2]
+
+        if is_ace:
+            hand1.done = True
+            hand2.done = True
+            next_idx = next((i for i, hh in enumerate(self.hands) if not hh.done), None)
+            if next_idx is None:
+                await self._finish_all_hands(interaction)
+            else:
+                self.cur_hand_idx = next_idx
+                await self.update_board(
+                    interaction,
+                    result_msg=f"✂️ **A 스플릿!** 각 핸드에 카드 1장씩 지급됩니다.\n\n"
+                               f"➡️ **핸드 {self.cur_hand_idx + 1}** 진행합니다.\n\n" + self.dialogue["next"]
+                )
+            return
+
+        await self.update_board(
+            interaction,
+            result_msg="✂️ **스플릿!** 핸드가 2개로 나뉘었습니다.\n\n핸드 1부터 진행합니다.\n\n" + self.dialogue["next"]
+        )
+
+    @discord.ui.button(label="보험 (Insurance)", style=discord.ButtonStyle.danger, emoji="🛡️", row=1)
+    async def insurance_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.insurance_offered or self.insurance_resolved:
+            return await interaction.response.send_message("❌ 지금은 보험에 가입할 수 없습니다.", ephemeral=True)
+        base_bet = self.hands[0].bet
+        ins_cost = base_bet // 2
+        bal = get_user_balance(self.user.id)
+        if bal < ins_cost:
+            return await interaction.response.send_message("❌ 보험금이 부족합니다.", ephemeral=True)
+
+        update_balance(self.user.id, -ins_cost)
+        self.insurance_taken    = True
+        self.insurance_resolved = True
+
+        dealer_bj = (get_bj_score(self.d_cards) == 21 and len(self.d_cards) == 2)
+        if dealer_bj:
+            payout = ins_cost * 3
+            update_balance(self.user.id, payout)
+            note = f"🛡️ 보험 적중! 딜러 블랙잭 확인 → +{payout:,} 청휘석 지급"
+        else:
+            note = "🛡️ 보험에 가입했지만 딜러는 블랙잭이 아니었습니다. 보험금은 소멸합니다."
+
+        self._sync_buttons()
+        await self.update_board(interaction, result_msg=f"{note}\n\n" + self.dialogue["next"])
 # ==========================================
 # 🖥️ 포커 UI
 # ==========================================
@@ -575,11 +867,11 @@ class AdminControlView(discord.ui.View):
                 discord.SelectOption(
                     label=p.member.display_name,
                     value=str(p.member.id),
-                    description="이 플레이어를 대기실에서 내보냅니다."
+                    description="이 학생을 대기실에서 내보냅니다."
                 ) for p in self.table.players
             ]
             self.kick_select = discord.ui.Select(
-                placeholder="🚨 강퇴할 플레이어를 선택하세요...",
+                placeholder="🚨 강퇴할 학생을 선택하세요...",
                 min_values=1, max_values=1, options=options[:25]
             )
             self.kick_select.callback = self.kick_callback
@@ -599,13 +891,13 @@ class AdminControlView(discord.ui.View):
     async def destroy_room(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_host_or_admin(interaction, self.table):
             return await interaction.response.send_message("❌ 권한이 없습니다.", ephemeral=True)
-        await self.table.destroy_table()
-        if self.table.table_id in bot.tables:
-            del bot.tables[self.table.table_id]
+        result = await self.table.force_finish_table()
         embed = discord.Embed(
-            title="💥 작전 취소됨",
-            description="관리자의 권한으로 현재 방이 강제 종료되었습니다.\n"
-                        "**참가했던 모든 플레이어의 소지금이 안전하게 반환되었습니다.**",
+            title="💥 테이블 종료됨",
+            description="관리자 권한으로 테이블이 종료되었습니다.\n"
+                        + ("진행 중인 게임은 현재 상태 기준으로 정산되었습니다."
+                           if result == "finished"
+                           else "대기 중인 테이블은 취소되고 참가비가 반환되었습니다."),
             color=0xFF0000
         )
         await interaction.response.edit_message(embed=embed, view=None)
@@ -623,19 +915,22 @@ class PokerLobbyView(discord.ui.View):
     def _make_lobby_embed(self):
         g_name  = "텍사스 홀덤" if self.table.game_type == "holdem" else "세븐 포커"
         bs_rule = "🔥 적용 (마운틴 다음)" if self.table.use_back_straight else "일반 룰 (최하위)"
-        embed = discord.Embed(title=f"🃏 {g_name} 대기방", description=f"방장: {self.table.host.mention}", color=0x3498db)
-        embed.add_field(name="참가비",   value=f"{self.table.entry_cost:,} 청휘석", inline=True)
-        embed.add_field(name="현재 인원", value=f"{len(self.table.players)}/6 명",   inline=True)
-        embed.add_field(name="백 스트레이트", value=bs_rule,                          inline=True)
+        embed = discord.Embed(
+            title=f"🃏 {g_name} 대기방",
+            description=f"방장: {self.table.host.mention}",
+            color=0x3498db
+        )
+        embed.add_field(name="참가비",       value=f"{self.table.entry_cost:,} 청휘석", inline=True)
+        embed.add_field(name="현재 인원",    value=f"{len(self.table.players)}/6 명",   inline=True)
+        embed.add_field(name="백 스트레이트", value=bs_rule,                              inline=True)
         embed.add_field(
             name="참가자 목록",
             value="\n".join(f"👤 {p.member.display_name}" for p in self.table.players) or "없음",
             inline=False
         )
-        # ── 블라인드 스케줄 표시 ──────────────────────────────────
-        sched_lines = []
-        bb = self.table.bb
-        sb = self.table.sb
+        sched_lines  = []
+        bb           = self.table.bb
+        sb           = self.table.sb
         interval_min = self.table.blind_interval // 60
         for i in range(5):
             mins = i * interval_min
@@ -653,23 +948,11 @@ class PokerLobbyView(discord.ui.View):
 
     @discord.ui.button(label="참가", style=discord.ButtonStyle.primary, custom_id="join_btn", row=0)
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ok, msg = await self.table.add_player_to_table(interaction.user)
+        if not ok:
+            return await interaction.response.send_message(msg, ephemeral=True)
         if self.table.game_started:
-            return await interaction.response.send_message("❌ 이미 시작된 게임입니다.", ephemeral=True)
-        if len(self.table.players) >= 6:
-            return await interaction.response.send_message("❌ 방이 꽉 찼습니다.", ephemeral=True)
-        if interaction.user.id in GLOBAL_PLAYING_USERS:
-            return await interaction.response.send_message("❌ 이미 다른 게임에 참가 중입니다.", ephemeral=True)
-        if self.table.get_player(interaction.user.id):
-            return await interaction.response.send_message("❌ 이미 이 방에 참가 중입니다.", ephemeral=True)
-
-        bal = get_user_balance(interaction.user.id)
-        if self.table.entry_cost > 0 and bal < self.table.entry_cost:
-            return await interaction.response.send_message("❌ 잔액이 부족합니다.", ephemeral=True)
-
-        if self.table.entry_cost > 0:
-            update_balance(interaction.user.id, -self.table.entry_cost)
-        GLOBAL_PLAYING_USERS.add(interaction.user.id)
-        self.table.players.append(Player(interaction.user, 10000))
+            return await interaction.response.send_message(msg, ephemeral=True)
         await self.update_lobby_message(interaction)
 
     @discord.ui.button(label="퇴장", style=discord.ButtonStyle.secondary, custom_id="leave_btn", row=0)
@@ -678,7 +961,8 @@ class PokerLobbyView(discord.ui.View):
         if not p:
             return await interaction.response.send_message("❌ 참가 중이 아닙니다.", ephemeral=True)
         if self.table.game_started:
-            return await interaction.response.send_message("❌ 게임 진행 중에는 퇴장 불가합니다.", ephemeral=True)
+            ok, msg = await self.table.abort_player(interaction.user)
+            return await interaction.response.send_message(msg, ephemeral=True)
 
         self.table.players.remove(p)
         GLOBAL_PLAYING_USERS.discard(interaction.user.id)
@@ -706,7 +990,11 @@ class PokerLobbyView(discord.ui.View):
             return await interaction.response.send_message("❌ 이미 시작되었습니다.", ephemeral=True)
 
         self.clear_items()
-        embed = discord.Embed(title="🚀 작전 개시!", description="샬레의 모든 자원을 투입합니다. 선생님, 행운을 빕니다!", color=0x00ff00)
+        embed = discord.Embed(
+            title="🚀 작전 개시!",
+            description="샬레의 모든 자원을 투입합니다. 선생님, 행운을 빕니다!",
+            color=0x00ff00
+        )
         await interaction.response.edit_message(embed=embed, view=self)
         await self.table.start_tournament()
 
@@ -716,7 +1004,11 @@ class PokerLobbyView(discord.ui.View):
             return await interaction.response.send_message("❌ 권한이 없습니다.", ephemeral=True)
         if self.table.game_started:
             return await interaction.response.send_message("❌ 게임이 이미 시작되어 설정 메뉴를 열 수 없습니다.", ephemeral=True)
-        embed = discord.Embed(title="🛡️ 작전 제어판", description="특정 학생을 내보내거나 작전을 강제 취소할 수 있습니다.", color=0x808080)
+        embed = discord.Embed(
+            title="🛡️ 작전 제어판",
+            description="특정 학생을 내보내거나 작전을 강제 취소할 수 있습니다.",
+            color=0x808080
+        )
         await interaction.response.edit_message(embed=embed, view=AdminControlView(self.table, self))
 
 
@@ -739,7 +1031,6 @@ async def send_private_hand_info(interaction, table):
     embed.add_field(name="현재 족보", value=f"### {hand_name(score)}", inline=False)
     embed.add_field(name="구성 카드", value=f"**{' '.join(card_str(c) for c in best5)}**", inline=False)
 
-    # ── 보드 힌트 (홀덤 + 플랍 이후) ────────────────────────────
     if table.game_type == "holdem" and table.community:
         combined = p.hole_cards + table.community
         c_score, _, c_best5 = eval_hand(combined, table.use_back_straight)
@@ -794,19 +1085,18 @@ class RebuyView(discord.ui.View):
         p = self.table.get_player(interaction.user.id)
         if not p or p.chips > 0:
             return await interaction.response.send_message("❌ 리바이인 대상이 아닙니다.", ephemeral=True)
-        if 10000 < self.table.bb * 25:
+        stack = self.table.starting_stack()
+        if stack < self.table.bb * 25:
             return await interaction.response.send_message("❌ 블라인드가 너무 높아 리바이인이 불가합니다.", ephemeral=True)
-        bal = get_user_balance(interaction.user.id)
-        if bal < self.table.entry_cost:
-            return await interaction.response.send_message("❌ 잔액이 부족합니다.", ephemeral=True)
-
         if self.table.entry_cost > 0:
+            bal = get_user_balance(interaction.user.id)
+            if bal < self.table.entry_cost:
+                return await interaction.response.send_message("❌ 잔액이 부족합니다.", ephemeral=True)
             update_balance(interaction.user.id, -self.table.entry_cost)
-        self.table.prize_pool += self.table.entry_cost
-        p.chips   = 10000
+            self.table.prize_pool += self.table.entry_cost
+        p.chips   = stack
         p.is_bust = False
         p.rank    = None
-        # 중복 제거 후 eliminated에서 제거
         if p in self.table.eliminated_players:
             self.table.eliminated_players.remove(p)
         await interaction.response.send_message("✅ 리바이인 완료! 전력을 재정비했습니다.", ephemeral=True)
@@ -828,7 +1118,6 @@ class ActionView(discord.ui.View):
         current_p = self.table.players[self.table.current_player_idx]
         if current_p == p:
             return True
-        # 내 차례 아닌 경우 → 예약 처리
         if p.folded or p.is_bust or p.all_in:
             await interaction.response.send_message("❌ 예약할 수 없는 상태입니다.", ephemeral=True)
             return False
@@ -879,85 +1168,232 @@ class ActionView(discord.ui.View):
 # ==========================================
 class Player:
     def __init__(self, member, chips):
-        self.member      = member
-        self.chips       = chips
-        self.bet         = 0
-        self.total_wager = 0
-        self.folded      = False
-        self.all_in      = False
-        self.acted       = False
-        self.is_bust     = False
-        self.hole_cards  = []
-        self.rank        = None
-        self.pre_action  = None
-        self.cards_open  = []
+        self.member       = member
+        self.chips        = chips
+        self.bet          = 0
+        self.total_wager  = 0
+        self.folded       = False
+        self.all_in       = False
+        self.acted        = False
+        self.is_bust      = False
+        self.hole_cards   = []
+        self.rank         = None
+        self.pre_action   = None
+        self.cards_open   = []
         self.cards_hidden = []
+        self.join_pending = False
 
     def reset_round(self):
         self.bet   = 0
         self.acted = False
 
     def reset_hand(self):
-        self.bet         = 0
-        self.total_wager = 0
-        self.folded      = False
-        self.all_in      = False
-        self.acted       = False
-        self.hole_cards  = []
-        self.pre_action  = None
-        self.cards_open  = []
+        self.bet          = 0
+        self.total_wager  = 0
+        self.folded       = False
+        self.all_in       = False
+        self.acted        = False
+        self.hole_cards   = []
+        self.pre_action   = None
+        self.cards_open   = []
         self.cards_hidden = []
+        self.join_pending = False
 
 
 class Table:
     def __init__(self, channel, entry_cost, host, table_id,
                  game_type="holdem", use_back_straight=False,
                  timeout_seconds=30, blind_interval=900, blind_multiplier=2):
-        self.channel          = channel
-        self.entry_cost       = entry_cost
-        self.host             = host
-        self.table_id         = table_id
-        self.game_type        = game_type
+        self.channel           = channel
+        self.entry_cost        = entry_cost
+        self.host              = host
+        self.table_id          = table_id
+        self.game_type         = game_type
         self.use_back_straight = use_back_straight
-        self.timeout_seconds  = timeout_seconds       # 설정 가능한 턴 제한
-        self.blind_interval   = blind_interval        # 블라인드 업 주기(초)
-        self.blind_multiplier = blind_multiplier      # 블라인드 증가 배수
+        self.timeout_seconds   = timeout_seconds
+        self.blind_interval    = blind_interval
+        self.blind_multiplier  = blind_multiplier
 
-        self.prize_pool       = 0
-        self.players          = []
+        self.prize_pool         = 0
+        self.players            = []
         self.eliminated_players = []
-        self.bb               = 100
-        self.sb               = 50
-        self.deck             = []
-        self.community        = []
-        self.pot              = 0
-        self.dealer_idx       = 0
-        self.game_started     = False
-        self.hand_active      = False
-        self.blind_timer_task = None
-        self.turn_timer_task  = None
-        self.action_msg       = None
+        self.bb                 = 100
+        self.sb                 = 50
+        self.deck               = []
+        self.community          = []
+        self.pot                = 0
+        self.dealer_idx         = 0
+        self.game_started       = False
+        self.hand_active        = False
+        self.blind_timer_task   = None
+        self.turn_timer_task    = None
+        self.action_msg         = None
         self.current_player_idx = 0
-        self.betting_round    = 0
-        self.current_bet      = 0
-        self.min_raise        = self.bb
-        self.rebuy_period     = False
-        self.turn_start_time  = 0
-        self.is_destroyed     = False
-        self.log_channel      = None   # 게임 히스토리 로그 채널 (선택)
+        self.betting_round      = 0
+        self.current_bet        = 0
+        self.min_raise          = self.bb
+        self.rebuy_period       = False
+        self.turn_start_time    = 0
+        self.is_destroyed       = False
+        self.log_channel        = None
+        self.aborted_players    = {}
 
-    # ── 기본 유틸 ────────────────────────────────────────────────
+    def starting_stack(self):
+        return self.entry_cost if self.entry_cost > 0 else 10000
+
     def get_player(self, mid):
         return next((p for p in self.players if p.member.id == mid), None)
 
     def active_players(self):
-        return [p for p in self.players if not p.folded and not p.is_bust]
+        return [p for p in self.players if not p.folded and not p.is_bust and not p.join_pending]
 
     def survivor_players(self):
         return [p for p in self.players if not p.is_bust]
 
     def players_can_act(self):
         return [p for p in self.active_players() if not p.all_in]
+
+    async def add_player_to_table(self, member):
+        if self.get_player(member.id):
+            return False, "❌ 이미 이 테이블에 참가 중입니다."
+        if len(self.players) >= 6:
+            return False, "❌ 테이블이 꽉 찼습니다."
+        if member.id in GLOBAL_PLAYING_USERS:
+            return False, "❌ 이미 다른 게임에 참가 중입니다."
+
+        record = self.aborted_players.get(member.id)
+        if record and record.get("valid") and self.game_started:
+            stack = max(0, record["chips"])
+            del self.aborted_players[member.id]
+            player = Player(member, stack)
+            player.join_pending = self.hand_active
+            if player.join_pending:
+                player.folded = True
+                player.acted  = True
+            self.players.append(player)
+            GLOBAL_PLAYING_USERS.add(member.id)
+            await self.broadcast(
+                content=f"🔁 **{member.display_name}** 플레이어가 이전 청휘석 {stack:,}으로 복귀했습니다."
+            )
+            return True, f"✅ 이전 청휘석 **{stack:,}**으로 같은 테이블에 복귀했습니다."
+
+        if member.id in self.aborted_players:
+            del self.aborted_players[member.id]
+
+        bal = get_user_balance(member.id)
+        if self.entry_cost > 0 and bal < self.entry_cost:
+            return False, "❌ 잔액이 부족합니다."
+        if self.entry_cost > 0:
+            update_balance(member.id, -self.entry_cost)
+            if self.game_started:
+                self.prize_pool += self.entry_cost
+
+        player = Player(member, self.starting_stack())
+        player.join_pending = self.game_started and self.hand_active
+        if player.join_pending:
+            player.folded = True
+            player.acted  = True
+        self.players.append(player)
+        GLOBAL_PLAYING_USERS.add(member.id)
+        if self.game_started:
+            await self.broadcast(
+                content=f"➕ **{member.display_name}** 플레이어가 테이블에 참가했습니다. 다음 핸드부터 행동합니다."
+            )
+        return True, "✅ 테이블에 참가했습니다."
+
+    async def abort_player(self, member):
+        """
+        게임 중 자발적 이탈.
+        현재 칩 수를 기록해 두고 나가며, 같은 테이블 경기가 끝나지 않은 동안은
+        재참가 시 그 칩으로 복귀할 수 있다.
+        """
+        p = self.get_player(member.id)
+        if not p:
+            return False, "❌ 참가 중이 아닙니다."
+
+        saved_chips = max(0, p.chips)
+        if p.bet > 0:
+            saved_chips      += p.bet
+            self.pot          = max(0, self.pot - p.bet)
+
+        self.aborted_players[member.id] = {
+            "member": member,
+            "chips":  saved_chips,
+            "valid":  True,
+        }
+
+        # ── [버그픽스 문제4] was_current는 반드시 remove 전에 판단 ──
+        was_current = (
+            self.hand_active
+            and len(self.players) > 0
+            and self.players[self.current_player_idx % len(self.players)] == p
+        )
+
+        if p in self.players:
+            self.players.remove(p)
+        GLOBAL_PLAYING_USERS.discard(member.id)
+
+        # ── [버그픽스 문제4] remove 후 인덱스 즉시 보정 ────────────
+        if len(self.players) > 0:
+            self.current_player_idx %= len(self.players)
+        else:
+            self.current_player_idx = 0
+
+        await self.broadcast(
+            content=f"🏳️ **{member.display_name}** 플레이어가 현재 청휘석 {saved_chips:,}을 기록하고 테이블을 중단했습니다."
+                    "\n(같은 테이블에 재참가하면 해당 청휘석으로 복귀합니다.)"
+        )
+
+        if not self.players:
+            self.is_destroyed = True
+            self.cancel_turn_timer()
+            if self.blind_timer_task:
+                self.blind_timer_task.cancel()
+            for rec in self.aborted_players.values():
+                rec["valid"] = False
+            if self.table_id in bot.tables:
+                del bot.tables[self.table_id]
+            return True, (
+                f"✅ 현재 청휘석 **{saved_chips:,}**을 기록하고 중단했습니다. "
+                "남은 플레이어가 없어 테이블이 종료되었습니다."
+            )
+
+        if self.host.id == member.id:
+            self.host = self.players[0].member
+
+        if self.hand_active:
+            active = self.active_players()
+
+            # ── [버그픽스 문제2] join_pending 제외 실질 생존자 1명 이하 체크 ──
+            non_pending_survivors = [p for p in self.survivor_players() if not p.join_pending]
+            if len(non_pending_survivors) <= 1:
+                self.cancel_turn_timer()
+                if non_pending_survivors:
+                    await self.end_hand_premature()
+                else:
+                    await self.finalize_hand()
+                return True, f"✅ 현재 청휘석 **{saved_chips:,}**을 기록하고 테이블 참가를 중단했습니다."
+
+            if len(active) <= 1:
+                self.cancel_turn_timer()
+                if active:
+                    await self.end_hand_premature()
+                else:
+                    await self.finalize_hand()
+            elif was_current:
+                self.cancel_turn_timer()
+                await self.next_turn_or_street()
+
+        # hand_active=False 상태 생존자 1명 이하 체크
+        survivors = self.survivor_players()
+        if self.game_started and not self.hand_active and len(survivors) <= 1:
+            await self.end_tournament(survivors[0] if survivors else None)
+
+        return True, f"✅ 현재 청휘석 **{saved_chips:,}**을 기록하고 테이블 참가를 중단했습니다."
+
+    def _invalidate_aborted_records(self):
+        for rec in self.aborted_players.values():
+            rec["valid"] = False
 
     def dealer_order(self, candidates):
         if not candidates:
@@ -986,14 +1422,12 @@ class Table:
             print(f"[Broadcast Error] {e}")
 
     async def log(self, content):
-        """게임 히스토리 로그 채널이 설정된 경우 별도 채널에도 전송"""
         if self.log_channel:
             try:
                 await self.log_channel.send(content)
             except:
                 pass
 
-    # ── 관리 기능 ────────────────────────────────────────────────
     async def kick_player(self, user_id: int):
         p = self.get_player(user_id)
         if p:
@@ -1013,7 +1447,31 @@ class Table:
                 update_balance(p.member.id, self.entry_cost)
         self.players.clear()
 
-    # ── 포지션 & 상태 표시 ──────────────────────────────────────
+    async def force_finish_table(self):
+        """
+        관리자 강제 종료.
+        대기 중이면 취소 + 참가비 반환.
+        진행 중이면 현재 칩 기준으로 정산.
+        """
+        if not self.game_started:
+            await self.destroy_table()
+            if self.table_id in bot.tables:
+                del bot.tables[self.table_id]
+            return "cancelled"
+
+        # ── [버그픽스 문제3] 타이머 정리 후 hand_active 명시적으로 내림 ──
+        self.cancel_turn_timer()
+        if self.blind_timer_task:
+            self.blind_timer_task.cancel()
+            self.blind_timer_task = None
+        self.hand_active = False   # finalize_hand 재진입 방지
+
+        candidates = self.survivor_players() or self.players
+        winner     = max(candidates, key=lambda p: p.chips, default=None)
+        await self.broadcast(content="🛑 **관리자 권한으로 현재 상태 기준 게임을 종료합니다.**")
+        await self.end_tournament(winner)
+        return "finished"
+
     def get_position_name(self, player_idx):
         total  = len(self.players)
         if total < 2: return "?"
@@ -1036,15 +1494,14 @@ class Table:
 
             cards_display = ""
             if self.game_type == "seven" and not p.is_bust:
-                open_str   = " ".join(card_str(c) for c in p.cards_open)
-                hidden_str = " ".join("[??]" for _ in p.cards_hidden)
+                open_str      = " ".join(card_str(c) for c in p.cards_open)
+                hidden_str    = " ".join("[??]" for _ in p.cards_hidden)
                 cards_display = f" | 공개: {open_str} {hidden_str}"
 
             pointer = "▶️" if i == self.current_player_idx else "  "
             lines.append(f"{pointer} `{pos_name}` **{p.member.display_name}**: {p.chips:,} {status}{cards_display}")
         return "\n".join(lines)
 
-    # ── 블라인드 타이머 ──────────────────────────────────────────
     async def start_blind_timer(self):
         self.blind_timer_task = asyncio.create_task(self._blind_loop())
 
@@ -1057,11 +1514,10 @@ class Table:
             await self.broadcast(content=msg)
             await self.log(msg)
 
-    # ── 턴 타이머 ────────────────────────────────────────────────
     async def start_turn_timer(self):
         self.cancel_turn_timer()
-        self.turn_start_time = time.time()
-        self.turn_timer_task = asyncio.create_task(self._turn_loop())
+        self.turn_start_time  = time.time()
+        self.turn_timer_task  = asyncio.create_task(self._turn_loop())
 
     def cancel_turn_timer(self):
         if self.turn_timer_task:
@@ -1078,8 +1534,8 @@ class Table:
 
     async def force_timeout_action(self):
         if not self.hand_active: return
-        p          = self.players[self.current_player_idx]
-        call_amt   = self.current_bet - p.bet
+        p           = self.players[self.current_player_idx]
+        call_amt    = self.current_bet - p.bet
         action_type = "check" if call_amt == 0 else "fold"
         msg = f"⏰ **{p.member.display_name}** 응답 없음 → 자동 **{action_type.upper()}**"
         await self.broadcast(content=msg)
@@ -1087,7 +1543,6 @@ class Table:
         self.cancel_turn_timer()
         await self.process_action(None, action_type)
 
-    # ── 초과 베팅 반환 ───────────────────────────────────────────
     async def return_uncalled_bets(self):
         active_bets = [p.bet for p in self.active_players()]
         if not active_bets: return
@@ -1098,7 +1553,7 @@ class Table:
             sec  = sorted_bets[1]
             for p in self.active_players():
                 if p.bet == high:
-                    ref = high - sec
+                    ref            = high - sec
                     p.chips       += ref
                     p.bet         -= ref
                     p.total_wager -= ref
@@ -1107,7 +1562,6 @@ class Table:
                     await self.broadcast(content=msg)
                     break
 
-    # ── 토너먼트 시작 ────────────────────────────────────────────
     async def start_tournament(self):
         if self.game_started: return
         self.game_started = True
@@ -1126,7 +1580,6 @@ class Table:
         await self.start_blind_timer()
         await self.start_hand()
 
-    # ── 세븐포커 선공 결정 ───────────────────────────────────────
     def set_first_actor_seven(self):
         active = self.active_players()
         if not active: return
@@ -1139,19 +1592,18 @@ class Table:
         active.sort(key=open_strength, reverse=True)
         self.current_player_idx = self.players.index(active[0])
 
-    # ── 핸드 시작 ────────────────────────────────────────────────
     async def start_hand(self):
         if self.is_destroyed: return
         survivors = self.survivor_players()
         if len(survivors) == 1:
             return await self.end_tournament(survivors[0])
 
-        self.deck         = make_deck(); random.shuffle(self.deck)
-        self.community    = []
-        self.pot          = 0
+        self.deck          = make_deck(); random.shuffle(self.deck)
+        self.community     = []
+        self.pot           = 0
         self.betting_round = 0
-        self.hand_active  = True
-        self.min_raise    = self.bb
+        self.hand_active   = True
+        self.min_raise     = self.bb
 
         if self.game_type == "holdem":
             for p in self.players:
@@ -1165,17 +1617,16 @@ class Table:
             bb_p = survivors[(dealer_ptr + 2) % count]
 
             for player, amt in ((sb_p, self.sb), (bb_p, self.bb)):
-                pay = min(amt, player.chips)
-                player.chips       -= pay
-                player.bet         += pay
+                pay                = min(amt, player.chips)
+                player.chips      -= pay
+                player.bet        += pay
                 player.total_wager += pay
-                self.pot           += pay
+                self.pot          += pay
                 if player.chips == 0: player.all_in = True
 
             self.current_bet = bb_p.bet
 
-            # dealer_idx는 survivors 기준 위치이므로 실제 players 위치로 변환한다.
-            start_node = self.players.index(bb_p)
+            start_node              = self.players.index(bb_p)
             self.current_player_idx = (start_node + 1) % len(self.players)
             for _ in range(len(self.players)):
                 p = self.players[self.current_player_idx]
@@ -1190,12 +1641,12 @@ class Table:
             embed.add_field(name="SB",   value=sb_p.member.display_name)
             embed.add_field(name="BB",   value=bb_p.member.display_name)
 
-        else:  # 세븐 포커
+        else:
             ante = self.sb
             for p in self.players:
                 p.reset_hand()
                 if not p.is_bust:
-                    pay = min(ante, p.chips)
+                    pay            = min(ante, p.chips)
                     p.chips       -= pay
                     p.bet         += pay
                     p.total_wager += pay
@@ -1216,15 +1667,14 @@ class Table:
         await self.broadcast(embed=embed, view=ShowHandView(self))
         await self.announce_turn()
 
-    # ── 다음 턴 또는 스트리트 ────────────────────────────────────
     async def next_turn_or_street(self):
         if self.is_destroyed: return
         active = self.active_players()
         if len(active) == 1:
             return await self.end_hand_premature()
 
-        players_in  = [p for p in active if not p.all_in]
-        all_acted   = all(p.acted for p in players_in)
+        players_in   = [p for p in active if not p.all_in]
+        all_acted    = all(p.acted for p in players_in)
         bets_matched = all(p.bet == self.current_bet for p in players_in)
 
         if not players_in or (all_acted and bets_matched):
@@ -1232,7 +1682,6 @@ class Table:
             await self.advance_street()
             return
 
-        # 다음 액션 가능 플레이어 탐색
         for _ in range(len(self.players)):
             self.current_player_idx = (self.current_player_idx + 1) % len(self.players)
             p = self.players[self.current_player_idx]
@@ -1240,7 +1689,6 @@ class Table:
                 break
         await self.announce_turn()
 
-    # ── 스트리트 진행 ────────────────────────────────────────────
     async def advance_street(self):
         self.betting_round += 1
         for p in self.players: p.reset_round()
@@ -1257,16 +1705,16 @@ class Table:
             hint_str  = board_best_hand_hint(self.community)
             embed = discord.Embed(title=f"🎴 **{stage}**", description=f"# {board_str}\n{hint_str}", color=0x5865F2)
 
-        else:  # 세븐 포커
-            if   self.betting_round == 1: [p.cards_open.append(deal_card(self.deck)) or setattr(p,'hole_cards',p.cards_hidden+p.cards_open) for p in self.active_players()]; stage = "4번째 카드 (공개)"
-            elif self.betting_round == 2: [p.cards_open.append(deal_card(self.deck)) or setattr(p,'hole_cards',p.cards_hidden+p.cards_open) for p in self.active_players()]; stage = "5번째 카드 (공개)"
-            elif self.betting_round == 3: [p.cards_open.append(deal_card(self.deck)) or setattr(p,'hole_cards',p.cards_hidden+p.cards_open) for p in self.active_players()]; stage = "6번째 카드 (공개)"
-            elif self.betting_round == 4: [p.cards_hidden.append(deal_card(self.deck)) or setattr(p,'hole_cards',p.cards_hidden+p.cards_open) for p in self.active_players()]; stage = "7번째 카드 (히든)"
+        else:
+            if   self.betting_round == 1: [p.cards_open.append(deal_card(self.deck)) or setattr(p, 'hole_cards', p.cards_hidden + p.cards_open) for p in self.active_players()]; stage = "4번째 카드 (공개)"
+            elif self.betting_round == 2: [p.cards_open.append(deal_card(self.deck)) or setattr(p, 'hole_cards', p.cards_hidden + p.cards_open) for p in self.active_players()]; stage = "5번째 카드 (공개)"
+            elif self.betting_round == 3: [p.cards_open.append(deal_card(self.deck)) or setattr(p, 'hole_cards', p.cards_hidden + p.cards_open) for p in self.active_players()]; stage = "6번째 카드 (공개)"
+            elif self.betting_round == 4: [p.cards_hidden.append(deal_card(self.deck)) or setattr(p, 'hole_cards', p.cards_hidden + p.cards_open) for p in self.active_players()]; stage = "7번째 카드 (히든)"
             else: return await self.do_showdown()
 
             embed = discord.Embed(title=f"🎴 **{stage}**", description="카드가 배분되었습니다.", color=0x5865F2)
 
-        embed.add_field(name="Pot", value=f"{self.pot:,} 칩")
+        embed.add_field(name="Pot",           value=f"{self.pot:,} 칩")
         embed.add_field(name="👥 Table Status", value=self.get_table_status_str(), inline=False)
         await self.broadcast(embed=embed, view=ShowHandView(self))
 
@@ -1275,11 +1723,10 @@ class Table:
             await self.advance_street()
             return
 
-        # ── 포스트플랍 첫 액터: SB(딜러 왼쪽)부터 ──────────────
         if self.game_type == "holdem":
-            survivors = self.survivor_players()
-            count     = len(survivors)
-            dealer_ptr = self.dealer_idx % count
+            survivors   = self.survivor_players()
+            count       = len(survivors)
+            dealer_ptr  = self.dealer_idx % count
             sb_survivor = survivors[(dealer_ptr + 1) % count]
             sb_idx = self.players.index(sb_survivor)
             self.current_player_idx = sb_idx
@@ -1292,7 +1739,6 @@ class Table:
 
         await self.announce_turn()
 
-    # ── 턴 공지 ─────────────────────────────────────────────────
     async def announce_turn(self):
         if self.is_destroyed: return
         if self.action_msg:
@@ -1301,10 +1747,9 @@ class Table:
 
         p = self.players[self.current_player_idx]
 
-        # 예약 행동 처리 (dead code 제거 후 단순화)
         if p.pre_action:
-            action     = p.pre_action; p.pre_action = None
-            call_cost  = self.current_bet - p.bet
+            action    = p.pre_action; p.pre_action = None
+            call_cost = self.current_bet - p.bet
             self.turn_start_time = time.time()
             if action == "fold":
                 act_str = "fold" if call_cost > 0 else "check"
@@ -1317,15 +1762,17 @@ class Table:
 
         to_call = self.current_bet - p.bet
         expiry  = int(time.time()) + self.timeout_seconds
-        pos     = self.get_position_name(self.current_player_idx) if self.game_type == "holdem" else ("선공" if to_call == 0 else "후공")
+        pos     = (self.get_position_name(self.current_player_idx)
+                   if self.game_type == "holdem"
+                   else ("선공" if to_call == 0 else "후공"))
 
         embed = discord.Embed(
             description=f"## ▶️ [{pos}] {p.member.mention} 차례\n⏳ **남은 시간:** <t:{expiry}:R>",
             color=0xFEE75C
         )
-        embed.add_field(name="Pot",   value=f"**{self.pot:,}**",    inline=True)
-        embed.add_field(name="Call",  value=f"**{to_call:,}**",     inline=True)
-        embed.add_field(name="Stack", value=f"**{p.chips:,}**",     inline=True)
+        embed.add_field(name="Pot",   value=f"**{self.pot:,}**", inline=True)
+        embed.add_field(name="Call",  value=f"**{to_call:,}**",  inline=True)
+        embed.add_field(name="Stack", value=f"**{p.chips:,}**",  inline=True)
         if self.game_type == "holdem" and self.community:
             board_str = "  ".join(card_str(c) for c in self.community)
             embed.add_field(name="Board", value=f"### {board_str}", inline=False)
@@ -1334,14 +1781,12 @@ class Table:
         self.action_msg = await self.broadcast(content=p.member.mention, embed=embed, view=ActionView(self))
         await self.start_turn_timer()
 
-    # ── 액션 처리 ────────────────────────────────────────────────
     async def process_action(self, interaction, act_type, amount=0):
         self.cancel_turn_timer()
         p       = self.players[self.current_player_idx]
         is_snap = (time.time() - self.turn_start_time) < 1.0
         prefix  = "⚡ **SNAP** " if is_snap else ""
 
-        # 오류 응답 전용 helper (패 정보는 보내지 않음)
         async def reply_err(content):
             if interaction:
                 if not interaction.response.is_done():
@@ -1351,7 +1796,6 @@ class Table:
             else:
                 await self.channel.send(content)
 
-        # 성공 응답 helper (패 정보 포함)
         async def reply_ok(content):
             if interaction:
                 if not interaction.response.is_done():
@@ -1377,7 +1821,7 @@ class Table:
             msg = f"{prefix}CHECK"
 
         elif act_type == "call":
-            pay = min(self.current_bet - p.bet, p.chips)
+            pay            = min(self.current_bet - p.bet, p.chips)
             p.chips       -= pay; p.bet += pay
             p.total_wager += pay; self.pot += pay
             if p.chips == 0: p.all_in = True; msg = f"🔥 {prefix}ALL-IN CALL"
@@ -1397,7 +1841,7 @@ class Table:
             if amount > max_raise_amount:
                 await reply_err(f"❌ 최대 레이즈 금액: {max_raise_amount:,}")
                 await self.start_turn_timer(); return
-            p.chips -= needed; p.bet = total
+            p.chips       -= needed; p.bet = total
             p.total_wager += needed; self.pot += needed
             self.current_bet = total; self.min_raise = amount
             for o in self.active_players():
@@ -1406,8 +1850,8 @@ class Table:
             is_bet_increase = True
 
         elif act_type == "allin":
-            pay = p.chips
-            p.chips = 0; p.bet += pay
+            pay            = p.chips
+            p.chips        = 0; p.bet += pay
             p.total_wager += pay; self.pot += pay; p.all_in = True
             if p.bet > self.current_bet:
                 diff = p.bet - self.current_bet
@@ -1431,11 +1875,12 @@ class Table:
         await reply_ok(f"✅ **{act_type.upper()}** 처리 완료.")
         await self.next_turn_or_street()
 
-    # ── 쇼다운 ──────────────────────────────────────────────────
     async def do_showdown(self):
-        active    = self.active_players()
-        board_desc = f"# {' '.join(card_str(c) for c in self.community)}" if self.game_type == "holdem" else "전 플레이어 핸드를 공개합니다!"
-        embed     = discord.Embed(title="🎊 SHOWDOWN", description=board_desc, color=0xFFD700)
+        active     = self.active_players()
+        board_desc = (f"# {' '.join(card_str(c) for c in self.community)}"
+                      if self.game_type == "holdem"
+                      else "전 플레이어 핸드를 공개합니다!")
+        embed = discord.Embed(title="🎊 SHOWDOWN", description=board_desc, color=0xFFD700)
 
         ranked = []
         for p in active:
@@ -1460,7 +1905,6 @@ class Table:
         await self.broadcast(embed=embed)
         ranked.sort(key=lambda x: x[1], reverse=True)
 
-        # ── 사이드팟 계산 (무한루프 방지 개선) ──────────────────
         contracts = {p: p.total_wager for p in self.players}
         log       = []
 
@@ -1472,7 +1916,6 @@ class Table:
             valid_w    = [w for w in winners if contracts.get(w, 0) > 0]
 
             if not valid_w:
-                # 이 등급 전원 계약금 소진 → 다음 등급으로
                 ranked = [item for item in ranked if item[1] != best_score]
                 continue
             valid_w = self.dealer_order(valid_w)
@@ -1480,11 +1923,10 @@ class Table:
             min_w = min(contracts[w] for w in valid_w)
             chunk = 0
             for p in self.players:
-                take = min(contracts.get(p, 0), min_w)
+                take         = min(contracts.get(p, 0), min_w)
                 contracts[p] = contracts.get(p, 0) - take
-                chunk += take
+                chunk       += take
 
-            # 나머지 칩 처리: chunk % len(valid_w) 는 가장 포지션 앞 플레이어에게
             share     = chunk // len(valid_w)
             remainder = chunk % len(valid_w)
             for i, w in enumerate(valid_w):
@@ -1492,7 +1934,6 @@ class Table:
                 w.chips += gain
                 log.append(f"🏆 {w.member.display_name} +{gain:,}")
 
-            # 이 tier 처리 완료: contracts가 0이 된 winner는 ranked에서 제거
             ranked = [item for item in ranked if contracts.get(item[0], 0) > 0 or item[1] != best_score]
 
         leftover = sum(v for v in contracts.values() if v > 0)
@@ -1506,7 +1947,6 @@ class Table:
         await self.log(result_str)
         await self.finalize_hand()
 
-    # ── 조기 종료 (폴드 승리) ────────────────────────────────────
     async def end_hand_premature(self):
         w     = self.active_players()[0]
         total = sum(p.total_wager for p in self.players)
@@ -1516,14 +1956,13 @@ class Table:
         await self.log(msg)
         await self.finalize_hand()
 
-    # ── 핸드 정리 ────────────────────────────────────────────────
     async def finalize_hand(self):
         if self.is_destroyed: return
         self.hand_active = False
         self.cancel_turn_timer()
 
         old_survivors = self.survivor_players()
-        old_dealer = old_survivors[self.dealer_idx % len(old_survivors)] if old_survivors else None
+        old_dealer    = old_survivors[self.dealer_idx % len(old_survivors)] if old_survivors else None
         busts = []
         for p in self.players:
             if p.chips <= 0 and not p.is_bust:
@@ -1560,7 +1999,6 @@ class Table:
         else:
             await asyncio.sleep(3)
 
-        # dealer_idx: 현재 생존자 기준으로 +1
         survivors_after = self.survivor_players()
         if survivors_after:
             if old_dealer and old_dealer in survivors_after:
@@ -1577,20 +2015,22 @@ class Table:
             else:
                 self.dealer_idx = 0
 
+        self._invalidate_aborted_records()
+
         survivors = self.survivor_players()
         if   len(survivors) >= 2: await self.start_hand()
         elif len(survivors) == 1: await self.end_tournament(survivors[0])
         else:                     await self.end_tournament(None)
 
-    # ── 토너먼트 종료 ────────────────────────────────────────────
     async def end_tournament(self, winner):
         try:
-            if self.blind_timer_task: self.blind_timer_task.cancel()
+            if self.blind_timer_task:
+                self.blind_timer_task.cancel()
+                self.blind_timer_task = None
             self.game_started = False
 
             rankings = [winner] if winner else []
             rankings.extend(reversed(self.eliminated_players))
-            # 중복 제거 (리바이인 후 재탈락 등)
             seen = set(); unique_rankings = []
             for r in rankings:
                 if r and r.member.id not in seen:
@@ -1628,9 +2068,9 @@ class Table:
             await self.channel.send("📋 **게임이 종료되어 방이 초기화되었습니다.**")
 
         finally:
-            # 예외 발생 시에도 반드시 전역 상태 해제
             for p in list(self.players):
                 GLOBAL_PLAYING_USERS.discard(p.member.id)
+            self._invalidate_aborted_records()
             if self.table_id in bot.tables:
                 del bot.tables[self.table_id]
 
@@ -1641,31 +2081,31 @@ def make_state_backup_payload():
     tables = []
     for table_id, table in bot.tables.items():
         tables.append({
-            "table_id": table_id,
-            "channel_id": table.channel.id if table.channel else None,
-            "host_id": table.host.id if table.host else None,
-            "game_type": table.game_type,
-            "entry_cost": table.entry_cost,
+            "table_id":    table_id,
+            "channel_id":  table.channel.id if table.channel else None,
+            "host_id":     table.host.id if table.host else None,
+            "game_type":   table.game_type,
+            "entry_cost":  table.entry_cost,
             "game_started": table.game_started,
             "hand_active": table.hand_active,
-            "sb": table.sb,
-            "bb": table.bb,
-            "pot": table.pot,
-            "dealer_idx": table.dealer_idx,
+            "sb":          table.sb,
+            "bb":          table.bb,
+            "pot":         table.pot,
+            "dealer_idx":  table.dealer_idx,
             "players": [
                 {
                     "user_id": p.member.id,
-                    "chips": p.chips,
+                    "chips":   p.chips,
                     "is_bust": p.is_bust,
-                    "folded": p.folded,
-                    "all_in": p.all_in,
+                    "folded":  p.folded,
+                    "all_in":  p.all_in,
                 }
                 for p in table.players
             ],
         })
     return {
-        "created_at": datetime.datetime.now().isoformat(),
-        "tables": tables,
+        "created_at":      datetime.datetime.now().isoformat(),
+        "tables":          tables,
         "blackjack_users": list(BLACKJACK_GAMES.keys()),
     }
 
@@ -1682,7 +2122,7 @@ async def backup_state_loop():
 class PokerBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=INTENTS)
-        self.tables = {}
+        self.tables      = {}
         self.backup_task = None
 
     async def setup_hook(self):
@@ -1712,19 +2152,22 @@ async def on_error(event, *args, **kwargs):
     import traceback
     print(f"[on_error] {event}\n{traceback.format_exc()}")
 
+def get_channel_table(channel_id):
+    return next((table for table in bot.tables.values() if table.channel.id == channel_id), None)
+
 # ==========================================
 # 📋 슬래시 커맨드
 # ==========================================
 @bot.tree.command(name="전적", description="내 전적 및 승률을 확인합니다.")
 async def stats(interaction: discord.Interaction):
-    row = get_user_stats_all(interaction.user.id)
-    wins  = row['wins_total'];  games = row['games_total']
+    row   = get_user_stats_all(interaction.user.id)
+    wins  = row['wins_total']; games = row['games_total']
     rate  = (wins / games * 100) if games > 0 else 0.0
 
     embed = discord.Embed(title=f"📊 {interaction.user.display_name} 선생님의 전투 기록", color=0x3498db)
-    embed.add_field(name="🏆 총 승리", value=f"{wins}회",          inline=True)
-    embed.add_field(name="🎮 총 게임", value=f"{games}판",          inline=True)
-    embed.add_field(name="📈 승률",    value=f"**{rate:.1f}%**",   inline=True)
+    embed.add_field(name="🏆 총 승리", value=f"{wins}회",        inline=True)
+    embed.add_field(name="🎮 총 게임", value=f"{games}판",        inline=True)
+    embed.add_field(name="📈 승률",    value=f"**{rate:.1f}%**", inline=True)
 
     table_str = "```\n      |  2인  |  3인  |  4인  |  5인  |  6인\n------+-------+-------+-------+-------+------\n"
     for cost in [0, 1, 3, 10]:
@@ -1740,13 +2183,13 @@ async def stats(interaction: discord.Interaction):
 
 @bot.tree.command(name="순위", description="서버 내 다양한 순위를 조회합니다.")
 @app_commands.choices(category=[
-    app_commands.Choice(name="💰 부자 랭킹 (보유 청휘석)",    value="balance"),
-    app_commands.Choice(name="🏆 전체 통합 승수",             value="wins_total"),
-    app_commands.Choice(name="🎮 전체 최다 플레이",           value="games_total"),
-    app_commands.Choice(name="💵 0 청휘석(무료) 최다승",      value="agg_cost_0k"),
-    app_commands.Choice(name="💵 1,000 청휘석 최다승",        value="agg_cost_1k"),
-    app_commands.Choice(name="💵 3,000 청휘석 최다승",        value="agg_cost_3k"),
-    app_commands.Choice(name="💵 10,000 청휘석 최다승",       value="agg_cost_10k"),
+    app_commands.Choice(name="💰 부자 랭킹 (보유 청휘석)",  value="balance"),
+    app_commands.Choice(name="🏆 전체 통합 승수",           value="wins_total"),
+    app_commands.Choice(name="🎮 전체 최다 플레이",         value="games_total"),
+    app_commands.Choice(name="💵 0 청휘석(무료) 최다승",    value="agg_cost_0k"),
+    app_commands.Choice(name="💵 1,000 청휘석 최다승",      value="agg_cost_1k"),
+    app_commands.Choice(name="💵 3,000 청휘석 최다승",      value="agg_cost_3k"),
+    app_commands.Choice(name="💵 10,000 청휘석 최다승",     value="agg_cost_10k"),
 ])
 async def rank(interaction: discord.Interaction, category: str):
     con   = db(); cur = con.cursor()
@@ -1757,10 +2200,10 @@ async def rank(interaction: discord.Interaction, category: str):
     elif category == "games_total":
         unit = "판"
     elif category.startswith("agg_cost_"):
-        cost         = category.split("_")[-1].replace("k", "")
-        sum_query    = " + ".join(f"w_{cost}k_{p}p" for p in range(2, 7))
+        cost          = category.split("_")[-1].replace("k", "")
+        sum_query     = " + ".join(f"w_{cost}k_{p}p" for p in range(2, 7))
         target_column = f"({sum_query}) as total_wins"
-        order_by     = "total_wins"
+        order_by      = "total_wins"
 
     try:
         cur.execute(f"SELECT user_id, {target_column} FROM {table} ORDER BY {order_by} DESC LIMIT 10")
@@ -1769,8 +2212,8 @@ async def rank(interaction: discord.Interaction, category: str):
         rows = []
     con.close()
 
-    embed = discord.Embed(title=f"🏆 랭킹 — {category}", color=0xFFD700)
-    medals = ["🥇","🥈","🥉"]
+    embed  = discord.Embed(title=f"🏆 랭킹 — {category}", color=0xFFD700)
+    medals = ["🥇", "🥈", "🥉"]
     for idx, row in enumerate(rows, 1):
         uid  = row[0]; val = row[1]
         user = interaction.guild.get_member(uid)
@@ -1790,10 +2233,10 @@ async def my_game(interaction: discord.Interaction):
     if bj:
         stage = "딜러 선택 중" if bj.get("stage") == "select" else "진행 중"
         embed = discord.Embed(title="🎮 내 게임 정보", color=0x3498db)
-        embed.add_field(name="종목", value="블랙잭", inline=True)
-        embed.add_field(name="상태", value=stage, inline=True)
+        embed.add_field(name="종목",   value="블랙잭",                       inline=True)
+        embed.add_field(name="상태",   value=stage,                           inline=True)
         embed.add_field(name="베팅액", value=f"{bj.get('bet', 0):,} 청휘석", inline=True)
-        embed.add_field(name="채널", value=interaction.channel.mention, inline=True)
+        embed.add_field(name="채널",   value=interaction.channel.mention,     inline=True)
         return await interaction.response.send_message(embed=embed, ephemeral=True)
 
     for table in bot.tables.values():
@@ -1801,13 +2244,13 @@ async def my_game(interaction: discord.Interaction):
         if p:
             g_name = "텍사스 홀덤" if table.game_type == "holdem" else "세븐 포커"
             status = "진행 중" if table.game_started else "대기 중"
-            embed = discord.Embed(title="🎮 내 게임 정보", color=0x3498db)
-            embed.add_field(name="종목",     value=g_name,                       inline=True)
-            embed.add_field(name="상태",     value=status,                        inline=True)
-            embed.add_field(name="참가비",   value=f"{table.entry_cost:,} 청휘석", inline=True)
-            embed.add_field(name="참가 인원", value=f"{len(table.players)}명",      inline=True)
-            embed.add_field(name="내 칩",    value=f"{p.chips:,}",                inline=True)
-            embed.add_field(name="채널",     value=table.channel.mention,         inline=True)
+            embed  = discord.Embed(title="🎮 내 게임 정보", color=0x3498db)
+            embed.add_field(name="종목",      value=g_name,                         inline=True)
+            embed.add_field(name="상태",      value=status,                          inline=True)
+            embed.add_field(name="참가비",    value=f"{table.entry_cost:,} 청휘석",  inline=True)
+            embed.add_field(name="참가 인원", value=f"{len(table.players)}명",       inline=True)
+            embed.add_field(name="내 칩",     value=f"{p.chips:,}",                  inline=True)
+            embed.add_field(name="채널",      value=table.channel.mention,           inline=True)
             return await interaction.response.send_message(embed=embed, ephemeral=True)
 
     await interaction.response.send_message("게임 정보를 찾을 수 없습니다.", ephemeral=True)
@@ -1821,32 +2264,31 @@ async def forfeit(interaction: discord.Interaction):
 
     bj = BLACKJACK_GAMES.get(uid)
     if bj:
-        view = bj.get("view")
-        bet = bj.get("bet", 0)
+        view  = bj.get("view")
+        bet   = bj.get("bet", 0)
         stage = bj.get("stage")
         BLACKJACK_GAMES.pop(uid, None)
         GLOBAL_PLAYING_USERS.discard(uid)
         if stage == "select":
             update_balance(uid, bet)
             if view:
-                view._ended = True
-                view.clear_items()
+                view._ended = True; view.clear_items()
                 if view.message:
-                    try:
-                        await view.message.edit(view=None)
-                    except:
-                        pass
-            return await interaction.response.send_message("🏳️ 블랙잭을 포기했습니다. 카드 공개 전이라 베팅액을 반환했습니다.", ephemeral=True)
+                    try: await view.message.edit(view=None)
+                    except: pass
+            return await interaction.response.send_message(
+                "🏳️ 블랙잭을 포기했습니다. 카드 공개 전이라 베팅액을 반환했습니다.", ephemeral=True
+            )
         if view:
-            view._ended = True
-            view.clear_items()
+            view._ended = True; view.clear_items()
             if view.message:
                 try:
                     embed = view.make_embed(end_game=True, result_msg=view.dialogue["lose"], color=0xFF0000)
                     await view.message.edit(embed=embed, view=None)
-                except:
-                    pass
-        return await interaction.response.send_message("🏳️ 블랙잭을 포기했습니다. 이번 판은 패배 처리됩니다.", ephemeral=True)
+                except: pass
+        return await interaction.response.send_message(
+            "🏳️ 블랙잭을 포기했습니다. 이번 판은 패배 처리됩니다.", ephemeral=True
+        )
 
     target_table = None
     for table in bot.tables.values():
@@ -1860,7 +2302,6 @@ async def forfeit(interaction: discord.Interaction):
     if p.folded or p.is_bust:
         return await interaction.response.send_message("❌ 이미 탈락 상태입니다.", ephemeral=True)
 
-    # 강제 폴드 처리
     p.folded  = True
     p.is_bust = True
     p.chips   = 0
@@ -1876,14 +2317,12 @@ async def forfeit(interaction: discord.Interaction):
     )
     await target_table.broadcast(content=f"🏳️ **{interaction.user.display_name}** 선생님이 기권하여 퇴장했습니다.")
 
-    # 게임 계속 진행 가능한지 체크
     survivors = target_table.survivor_players()
     if len(survivors) < 2:
         if target_table.hand_active:
             target_table.cancel_turn_timer()
             await target_table.finalize_hand()
     elif target_table.hand_active:
-        # 현재 차례였다면 다음으로 넘김
         cur_p = target_table.players[target_table.current_player_idx] if target_table.players else None
         if cur_p == p:
             await target_table.next_turn_or_street()
@@ -1905,13 +2344,12 @@ async def admin_force_end(interaction: discord.Interaction, channel: discord.Tex
         for uid, bj in list(BLACKJACK_GAMES.items()):
             if bj.get("channel_id") == channel.id:
                 view = bj.get("view")
-                bet = bj.get("bet", 0)
+                bet  = bj.get("bet", 0)
                 update_balance(uid, bet)
                 GLOBAL_PLAYING_USERS.discard(uid)
                 BLACKJACK_GAMES.pop(uid, None)
                 if view:
-                    view._ended = True
-                    view.clear_items()
+                    view._ended = True; view.clear_items()
                     if view.message:
                         try:
                             embed = discord.Embed(
@@ -1920,8 +2358,7 @@ async def admin_force_end(interaction: discord.Interaction, channel: discord.Tex
                                 color=0x95a5a6
                             )
                             await view.message.edit(embed=embed, view=None)
-                        except:
-                            pass
+                        except: pass
                 ended_blackjack.append(uid)
         if ended_blackjack:
             await interaction.response.send_message(
@@ -1931,14 +2368,17 @@ async def admin_force_end(interaction: discord.Interaction, channel: discord.Tex
             return await channel.send("🛑 **관리자 권한으로 블랙잭 게임이 강제 종료되었습니다. 베팅액이 반환되었습니다.**")
         return await interaction.response.send_message("❌ 해당 채널에서 진행 중인 게임이 없습니다.", ephemeral=True)
 
-    await target.destroy_table()
-    if target.table_id in bot.tables:
-        del bot.tables[target.table_id]
-
-    await interaction.response.send_message(
-        f"✅ {channel.mention}의 게임을 강제 종료하고 모든 참가자에게 크레딧을 반환했습니다.", ephemeral=True
-    )
-    await channel.send("🛑 **관리자 권한으로 게임이 강제 종료되었습니다. 참가비가 전액 반환되었습니다.**")
+    result = await target.force_finish_table()
+    if result == "finished":
+        await interaction.response.send_message(
+            f"✅ {channel.mention}의 게임을 현재 상태 기준으로 종료 정산했습니다.", ephemeral=True
+        )
+        await channel.send("🛑 **관리자 권한으로 게임이 현재 상태 기준 종료되었습니다.**")
+    else:
+        await interaction.response.send_message(
+            f"✅ {channel.mention}의 대기 중 테이블을 취소하고 참가비를 반환했습니다.", ephemeral=True
+        )
+        await channel.send("🛑 **관리자 권한으로 대기 중 테이블이 취소되었습니다. 참가비가 반환되었습니다.**")
 
 
 @bot.tree.command(name="admin_reset_stats", description="[관리자] 전적 초기화 (유저 미지정 시 전체)")
@@ -1950,15 +2390,25 @@ async def reset_stats(interaction: discord.Interaction, user: discord.Member = N
     await interaction.response.send_message(f"✅ **{tgt}**의 전적이 초기화되었습니다.", ephemeral=True)
 
 
-@bot.tree.command(name="admin_money", description="[관리자] 특정 유저의 자산을 설정합니다.")
-@app_commands.describe(user="대상 유저", amount="설정할 액수")
-async def admin_money(interaction: discord.Interaction, user: discord.Member, amount: int):
+@bot.tree.command(name="admin_money", description="[관리자] 특정 유저 또는 전체 유저의 자산을 설정합니다.")
+@app_commands.describe(amount="설정할 액수", user="대상 유저 (미지정 시 전체 유저에게 적용)")
+async def admin_money(interaction: discord.Interaction, amount: int, user: discord.Member = None):
     if not is_authorized_admin(interaction):
         return await interaction.response.send_message("⚠️ 권한이 없습니다.", ephemeral=True)
-    set_balance(user.id, amount)
-    await interaction.response.send_message(
-        f"⚙️ **{user.display_name}** 선생님의 자산을 **{amount:,} 청휘석**으로 조정했습니다.", ephemeral=True
-    )
+    if user:
+        set_balance(user.id, amount)
+        await interaction.response.send_message(
+            f"⚙️ **{user.display_name}** 선생님의 자산을 **{amount:,} 청휘석**으로 조정했습니다.", ephemeral=True
+        )
+    else:
+        set_all_balances(amount)
+        embed = discord.Embed(
+            title="⚙️ 전체 자산 일괄 설정",
+            description=f"모든 유저의 자산을 **{amount:,} 청휘석**으로 설정했습니다.",
+            color=0x808080
+        )
+        embed.set_footer(text=f"집행: {interaction.user.display_name}")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="admin_전체지급", description="[관리자] 모든 유저에게 지원금을 지급합니다.")
@@ -1970,9 +2420,17 @@ async def admin_give_all(interaction: discord.Interaction, amount: int):
         return await interaction.response.send_message("❌ 0 청휘석은 지급할 수 없습니다.", ephemeral=True)
     update_all_balances(amount)
     if amount > 0:
-        embed = discord.Embed(title="🎁 전 서버 특별 지원금!", description=f"전원에게 **{amount:,} 청휘석** 지급!", color=0x2ecc71)
+        embed = discord.Embed(
+            title="🎁 전 서버 특별 지원금!",
+            description=f"전원에게 **{amount:,} 청휘석** 지급!",
+            color=0x2ecc71
+        )
     else:
-        embed = discord.Embed(title="🚨 자산 긴급 회수", description=f"전원에게서 **{abs(amount):,} 청휘석** 회수.", color=0xe74c3c)
+        embed = discord.Embed(
+            title="🚨 자산 긴급 회수",
+            description=f"전원에게서 **{abs(amount):,} 청휘석** 회수.",
+            color=0xe74c3c
+        )
     embed.set_footer(text=f"집행: {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
@@ -2013,9 +2471,9 @@ async def blackjack(interaction: discord.Interaction, amount: int):
     embed.set_footer(text=f"베팅액: {amount:,} 청휘석 | 잘못 눌렀다면 [게임 종료]")
     view = BlackjackCharacterSelectView(interaction.user, amount)
     BLACKJACK_GAMES[interaction.user.id] = {
-        "stage": "select",
-        "view": view,
-        "bet": amount,
+        "stage":      "select",
+        "view":       view,
+        "bet":        amount,
         "channel_id": interaction.channel.id if interaction.channel else None,
     }
     try:
@@ -2058,9 +2516,9 @@ async def create(
     if entry > 0 and bal < entry:
         return await interaction.response.send_message(f"❌ 참가비 부족 (보유: {bal:,} 청휘석)", ephemeral=True)
 
-    use_bs     = (back_straight == "true")
-    table_id   = str(uuid.uuid4())
-    new_table  = Table(
+    use_bs    = (back_straight == "true")
+    table_id  = str(uuid.uuid4())
+    new_table = Table(
         channel=interaction.channel,
         entry_cost=entry,
         host=interaction.user,
@@ -2076,11 +2534,9 @@ async def create(
     if entry > 0:
         update_balance(interaction.user.id, -entry)
     GLOBAL_PLAYING_USERS.add(interaction.user.id)
-    new_table.players.append(Player(interaction.user, 10000))
+    new_table.players.append(Player(interaction.user, new_table.starting_stack()))
 
     lobby_view = PokerLobbyView(new_table)
     await interaction.response.send_message(embed=lobby_view._make_lobby_embed(), view=lobby_view)
 
-
-bot.run("MTUxNjAzMzQ1NjAwNDM5OTIzNg.GX8GAT.WpoFIvHZisPMd19NNlxPjOpB0kmWmOjPKqxLrs")
-
+bot.run(BOT_TOKEN)
